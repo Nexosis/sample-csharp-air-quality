@@ -195,3 +195,4 @@ UnitTestResults.txt
 /model
 /obs
 
+*.sqlite3
