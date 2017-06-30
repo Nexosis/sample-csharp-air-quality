@@ -10,6 +10,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Data.Sqlite.Internal;
 using Mono.Options;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Serialization;
 using Nexosis.Api.Client;
 using Nexosis.Api.Client.Model;
 
@@ -26,7 +27,8 @@ namespace AirQuality
             Upload, // saves the data to Nexosis API for later processing
             Forecast, // predict future values using the saved data
             Impact, // look at the impact of past events on the values
-            Results // query the API and save results to the database in a separate table
+            Results, // query the API and save results to the database in a separate table
+            List, // print list of items submitted to the API
         }
 
         static void Main(string[] args)
@@ -36,6 +38,7 @@ namespace AirQuality
             var database = string.Empty;
             var dataSetName = string.Empty;
             var impactName = string.Empty;
+            var listType = string.Empty;
             DateTimeOffset? startDate = null;
             DateTimeOffset? endDate = null;
             Guid? sessionId = null;
@@ -59,6 +62,7 @@ namespace AirQuality
                 { "name=", "Name for the forecast or impact analysis session", v => { impactName = v; } },
                 { "results", "Get results. Requires --sessionid to be given.", v => { action = Action.Results; } },
                 { "id|sessionid=", "Id from forecast or impact session. Used when querying results.", v => { sessionId = Guid.Parse(v); } },
+                { "list=", "", v => { action = Action.List; listType = v; } },
                 { "s|start=", "Date and time (ISO 8601 format) to start prediction/analysis." , v => { startDate = DateTimeOffset.Parse(v); } },
                 { "e|end=", "Date and time (ISO 8601 format) to end prediction/analysis.", v => { endDate = DateTimeOffset.Parse(v); } }
             };
@@ -118,6 +122,15 @@ namespace AirQuality
                     }
                     Console.Out.WriteLine($"Getting results for session: {sessionId}...");
                     Results(database, sessionId.Value).GetAwaiter().GetResult();
+                    break;
+                case Action.List:
+                    if (string.IsNullOrEmpty(listType))
+                    {
+                        Console.Error.WriteLine("The type of object to list must be given.");
+                        ShowHelp(options);
+                        break;
+                    }
+                    ListItems(listType).GetAwaiter().GetResult();
                     break;
                 default:
                     ShowHelp(options);
@@ -361,6 +374,29 @@ namespace AirQuality
             }
         }
         
+        private static async Task ListItems(string listType)
+        {
+            var api = new NexosisClient(Environment.GetEnvironmentVariable("NEXOSIS_PROD_KEY"));
+            if (listType.Equals("data", StringComparison.OrdinalIgnoreCase))
+            {
+                var results = await api.DataSets.List();
+                foreach (var r in results)
+                {
+                    Console.Out.WriteLine(r.DataSetName); 
+                }
+            }
+            else if (listType.Equals("sessions", StringComparison.OrdinalIgnoreCase))
+            {
+                var results = await api.Sessions.List();
+                Console.Out.WriteLine("SessionId                           \tRequested Date                   \tStart Date                         \tEnd Date                         \tType      \tStatus");
+                foreach (var r in results)
+                {
+                    Console.Out.WriteLine( $"{r.SessionId:D}\t{r.RequestedDate:O}\t{r.StartDate:O}\t{r.EndDate:O}\t{r.Type.ToString("G").PadRight(10)}\t{r.Status}");
+                }
+            }
+        }
+
+        
         
         // table schema definition methods 
         private static void SetupImport(SqliteConnection db)
@@ -377,7 +413,7 @@ namespace AirQuality
 
         private static void SetupSessionResults(SqliteConnection db)
         {
-            db.CreateCommand("CREATE TABLE IF NOT EXISTS sessions(session_id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, session_date TEXT NOT NULL)").ExecuteNonQuery();
+            db.CreateCommand("CREATE TABLE IF NOT EXISTS sessions(session_id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, session_date TEXT NOT NULL, meta TEXT)").ExecuteNonQuery();
             db.CreateCommand("CREATE TABLE IF NOT EXISTS session_results(session_id TEXT NOT NULL, timestamp TEXT NOT NULL, value DOUBLE NOT NULL, FOREIGN KEY(session_id) REFERENCES sessions(session_id))").ExecuteNonQuery();
         }
         
@@ -436,7 +472,7 @@ namespace AirQuality
         private static void AddResult(Guid sessionId, SqliteConnection db, SessionResult results, Dictionary<string, string> item)
         {
             db.CreateCommand(
-                "INSERT INTO session_results VALUES (@id, @date, @ts, @value)",
+                "INSERT INTO session_results VALUES (@id, @ts, @value)",
                 new SqliteParameter("@id", sessionId.ToString("N")),
                 new SqliteParameter("@ts", item["timestamp"]),
                 new SqliteParameter("@value", item["value"])
