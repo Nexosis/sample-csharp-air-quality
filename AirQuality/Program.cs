@@ -39,6 +39,7 @@ namespace AirQuality
             var dataSetName = string.Empty;
             var impactName = string.Empty;
             var listType = string.Empty;
+            var processType = string.Empty;
             DateTimeOffset? startDate = null;
             DateTimeOffset? endDate = null;
             Guid? sessionId = null;
@@ -55,7 +56,7 @@ namespace AirQuality
                             SearchOption.TopDirectoryOnly));
                     }
                 },
-                { "preprocess", "Run the pre-processing to eliminate invalid values", v => { action = Action.Preprocess; } },
+                { "preprocess=", "Run the pre-processing to eliminate invalid values", v => { action = Action.Preprocess; processType = v; } },
                 { "upload", "Save the data to the Nexosis API", v => { action = Action.Upload; } },
                 { "forecast", "Run forecasting for the period given by the start and end dates.", v => { action = Action.Forecast; } },
                 { "impact", "Run impact analysis for period given by the start and end dates. Also requires a name is given.", v => { action = Action.Impact; } },
@@ -87,7 +88,7 @@ namespace AirQuality
                     break;
                 case Action.Preprocess:
                     Console.Out.WriteLine("Ensuring continuous data");
-                    Preprocess(database);
+                    Preprocess(database, processType);
                     break;
                 case Action.Upload:
                     Console.Out.WriteLine("Submitting data to Nexosis API");
@@ -204,7 +205,7 @@ namespace AirQuality
         }
 
         // imputes values for missing data saving to db
-        private static void Preprocess(string database)
+        private static void Preprocess(string database, string processType)
         {
             using (var db = OpenDatabase(database))
             {
@@ -365,7 +366,7 @@ namespace AirQuality
                 {
                     foreach (var item in results.Data)
                     {
-                        AddResult(sessionId, db, results, item);
+                        AddResult(sessionId, db, item);
                     }
                     tran.Commit();
                 }
@@ -401,23 +402,21 @@ namespace AirQuality
         // table schema definition methods 
         private static void SetupImport(SqliteConnection db)
         {
-            db.CreateCommand("DROP TABLE IF EXISTS import").ExecuteNonQuery();
-            db.CreateCommand("CREATE TABLE import (id integer PRIMARY KEY AUTOINCREMENT, timestamp text NOT NULL, value integer NOT NULL, is_valid INTEGER DEFAULT 0)").ExecuteNonQuery();
+            db.CreateCommand("CREATE TABLE IF NOT EXISTS import (id integer PRIMARY KEY AUTOINCREMENT, timestamp text NOT NULL, value integer NOT NULL, is_valid INTEGER DEFAULT 0)").ExecuteNonQuery();
         }
 
         private static void SetupProcessing(SqliteConnection db)
         {
-            db.CreateCommand("DROP TABLE IF EXISTS measurements").ExecuteNonQuery();
-            db.CreateCommand("CREATE TABLE measurements(id integer PRIMARY KEY AUTOINCREMENT, timestamp text NOT NULL, value integer NOT NULL, source text NOT NULL)").ExecuteNonQuery();
+            db.CreateCommand("CREATE TABLE IF NOT EXISTS measurements(id integer PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, value INTEGER NOT NULL, source TEXT NOT NULL, interval TEXT NOT NULL default 'd')").ExecuteNonQuery();
         }
 
         private static void SetupSessionResults(SqliteConnection db)
         {
-            db.CreateCommand("CREATE TABLE IF NOT EXISTS sessions(session_id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, session_date TEXT NOT NULL, meta TEXT)").ExecuteNonQuery();
-            db.CreateCommand("CREATE TABLE IF NOT EXISTS session_results(session_id TEXT NOT NULL, timestamp TEXT NOT NULL, value DOUBLE NOT NULL, FOREIGN KEY(session_id) REFERENCES sessions(session_id))").ExecuteNonQuery();
+            db.CreateCommand("CREATE TABLE IF NOT EXISTS sessions(id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL, session_date TEXT NOT NULL, meta TEXT)").ExecuteNonQuery();
+            db.CreateCommand("CREATE TABLE IF NOT EXISTS session_results(session_id INTEGER NOT NULL, timestamp TEXT NOT NULL, value DOUBLE NOT NULL, FOREIGN KEY(session_id) REFERENCES sessions(id))").ExecuteNonQuery();
         }
-        
        
+
         // `import` table data access
         private static void AddMeasurement(SqliteConnection db, DateTimeOffset date, int value, bool valid)
         {
@@ -436,7 +435,7 @@ namespace AirQuality
 
         private static void CopyValidData(SqliteConnection db)
         {
-            db.CreateCommand("INSERT INTO measurements SELECT NULL, timestamp, value, 'sensor' FROM import WHERE is_valid = 1").ExecuteNonQuery();
+            db.CreateCommand("INSERT INTO measurements SELECT NULL, timestamp, value, 'sensor', 'h' FROM import WHERE is_valid = 1").ExecuteNonQuery();
         }
 
         
@@ -444,7 +443,7 @@ namespace AirQuality
         private static SqliteDataReader GetMeasurements(SqliteConnection db, DateTimeOffset? startDate, DateTimeOffset? endDate)
         {
             return db.CreateCommand(
-                "SELECT timestamp, value FROM measurements WHERE timestamp BETWEEN @start AND @end ORDER BY timestamp",
+                "SELECT timestamp, value FROM measurements WHERE interval = 'h' AND timestamp BETWEEN @start AND @end ORDER BY timestamp",
                 new SqliteParameter("@start", startDate ?? DateTimeOffset.MinValue),
                 new SqliteParameter("@end", endDate ?? DateTimeOffset.MaxValue)).ExecuteReader();
         }
@@ -452,7 +451,7 @@ namespace AirQuality
         private static void AddImputedValue(SqliteConnection db, DateTimeOffset date, int value)
         {
             db.CreateCommand(
-                "INSERT INTO measurements VALUES(NULL, @ts, @value, 'imputed')",
+                "INSERT INTO measurements VALUES(NULL, @ts, @value, 'imputed', 'h')",
                 new SqliteParameter("@ts", date.ToString("O")),
                 new SqliteParameter("@value", value)
             ).ExecuteNonQuery();
@@ -462,14 +461,14 @@ namespace AirQuality
         // `session` table data access
         private static void AddSessionRecord(SqliteConnection db, Guid sessionId, string sessionName, DateTimeOffset date)
         {
-            db.CreateCommand("INSERT INTO sessions VALUES(@id, @name, @date)",
-                new SqliteParameter("@id", sessionId),
+            db.CreateCommand("INSERT INTO sessions VALUES(NULL, @id, @name, @date)",
+                new SqliteParameter("@id", sessionId.ToString("N")),
                 new SqliteParameter("@name", sessionName),
                 new SqliteParameter("@date", date)
             ).ExecuteNonQuery();
         }
         
-        private static void AddResult(Guid sessionId, SqliteConnection db, SessionResult results, Dictionary<string, string> item)
+        private static void AddResult(Guid sessionId, SqliteConnection db, Dictionary<string, string> item)
         {
             db.CreateCommand(
                 "INSERT INTO session_results VALUES (@id, @ts, @value)",
