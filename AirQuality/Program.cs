@@ -7,10 +7,8 @@ using System.Threading.Tasks;
 using CsvHelper;
 using CsvHelper.Configuration;
 using Microsoft.Data.Sqlite;
-using Microsoft.Data.Sqlite.Internal;
 using Mono.Options;
 using Newtonsoft.Json;
-using Newtonsoft.Json.Serialization;
 using Nexosis.Api.Client;
 using Nexosis.Api.Client.Model;
 
@@ -40,6 +38,8 @@ namespace AirQuality
             var impactName = string.Empty;
             var listType = string.Empty;
             var processType = string.Empty;
+            var source = string.Empty;
+            var interval = string.Empty;
             DateTimeOffset? startDate = null;
             DateTimeOffset? endDate = null;
             Guid? sessionId = null;
@@ -49,6 +49,8 @@ namespace AirQuality
                 { "h|help", "Show this message and exit", v => { action = Action.Help; } },
                 { "d|database=", "Set the database name", v => { database = Path.GetFullPath(v); } },
                 { "ds|dataset=", "Set the data set name", v => { dataSetName = v; } },
+                { "source=", "Set the type of source column for data upload", v => { source = v;  } },
+                { "interval=", "Set the interval used to query the data or used to ask for predictions", v => { interval = v;  } },
                 { "import", "", v => { action = Action.Import; } },
                 { "files=", "Files to use as part of import", v =>
                     {
@@ -92,7 +94,7 @@ namespace AirQuality
                     break;
                 case Action.Upload:
                     Console.Out.WriteLine("Submitting data to Nexosis API");
-                    UploadData(database, dataSetName, startDate, endDate).GetAwaiter().GetResult();
+                    UploadData(database, dataSetName, startDate, endDate, source, interval).GetAwaiter().GetResult();
                     break;
                 case Action.Forecast:
                     if (!startDate.HasValue || !endDate.HasValue)
@@ -102,7 +104,7 @@ namespace AirQuality
                         break;
                     }
                     Console.Out.WriteLine($"Initiating forecast for {dataSetName} over dates {startDate:O} to {endDate:O}");
-                    Forecast(database, dataSetName, startDate.Value, endDate.Value).GetAwaiter().GetResult();
+                    Forecast(database, dataSetName, startDate.Value, endDate.Value, interval).GetAwaiter().GetResult();
                     break;
                 case Action.Impact:
                     if (!startDate.HasValue || !endDate.HasValue || string.IsNullOrWhiteSpace(impactName))
@@ -112,7 +114,7 @@ namespace AirQuality
                         break;
                     }
                     Console.Out.WriteLine($"Analyzing impact of event {impactName} on dates {startDate:O} to {endDate:O}");
-                    Impact(database, impactName, dataSetName, startDate.Value, endDate.Value).GetAwaiter().GetResult();
+                    Impact(database, impactName, dataSetName, startDate.Value, endDate.Value, interval).GetAwaiter().GetResult();
                     break;
                 case Action.Results:
                     if (!sessionId.HasValue)
@@ -131,7 +133,7 @@ namespace AirQuality
                         ShowHelp(options);
                         break;
                     }
-                    ListItems(listType).GetAwaiter().GetResult();
+                    ListItems(listType, database).GetAwaiter().GetResult();
                     break;
                 default:
                     ShowHelp(options);
@@ -159,7 +161,7 @@ namespace AirQuality
 
             return conn;
         }
-        
+
         // loads the files into the local db
         private static void RunImport(string database, IEnumerable<string> files)
         {
@@ -266,20 +268,20 @@ namespace AirQuality
         }
 
         // pulls data from local db and submits to API
-        private static async Task UploadData(string database, string dataSetName, DateTimeOffset? startDate, DateTimeOffset? endDate)
+        private static async Task UploadData(string database, string dataSetName, DateTimeOffset? startDate, DateTimeOffset? endDate, string source = null, string interval = "hour")
         {
             var columns = new Dictionary<string, ColumnMetadata>
             {
                 { "timestamp", new ColumnMetadata { DataType = ColumnType.Date, Role = ColumnRole.Timestamp } },
                 { "value", new ColumnMetadata { DataType = ColumnType.Numeric, Role = ColumnRole.Target } }
             };
-            var api = new NexosisClient(Environment.GetEnvironmentVariable("NEXOSIS_PROD_KEY"));
+            var api = new NexosisClient("249c5810fd58403c9e2bfeae423a72fd"); //Environment.GetEnvironmentVariable("NEXOSIS_PROD_KEY"));
 
             using (var db = OpenDatabase(database))
             {
-                var measurements = LoadMeasurements(db, startDate, endDate);
+                var measurements = LoadMeasurements(db, startDate, endDate, source, interval);
                 var batchSize = 5000;
-               
+
                 // there is a limit on request size so we batch the data that is to be uploaded
                 for (int i = 0; i < ((measurements.Count / batchSize) + 1); i++)
                 {
@@ -292,12 +294,12 @@ namespace AirQuality
                 db.Close();
             }
         }
-        private static List<Dictionary<string,string>> LoadMeasurements(SqliteConnection db, DateTimeOffset? startDate, DateTimeOffset? endDate)
+        private static List<Dictionary<string, string>> LoadMeasurements(SqliteConnection db, DateTimeOffset? startDate, DateTimeOffset? endDate, string source, string interval)
         {
             var measures = new List<Dictionary<string, string>>();
 
             // get all the data out
-            var reader = GetMeasurements(db, startDate, endDate);
+            var reader = GetMeasurements(db, startDate, endDate, source, interval);
             while (reader.Read())
             {
                 measures.Add(new Dictionary<string, string>
@@ -310,29 +312,36 @@ namespace AirQuality
         }
 
         // submits a forecast session
-        private static async Task Forecast(string database, string dataSetName, DateTimeOffset startDate, DateTimeOffset endDate)
+        private static async Task Forecast(string database, string dataSetName, DateTimeOffset startDate, DateTimeOffset endDate, string interval = "Day")
         {
             var api = new NexosisClient(Environment.GetEnvironmentVariable("NEXOSIS_PROD_KEY"));
-
+            if (!Enum.TryParse(interval, /*ignoreCase*/ true, out ResultInterval parsedInterval))
+            {
+                parsedInterval = ResultInterval.Day;
+            }
             // given the name of the dataset, the 'column' of the data to predict on and the date range, it is easy to kick it off.
-            var foreacstSession = await api.Sessions.CreateForecast(dataSetName, "value", startDate, endDate, ResultInterval.Hour);
-            
+            var foreacstSession = await api.Sessions.CreateForecast(dataSetName, "value", startDate, endDate, parsedInterval);
+
             using (var db = OpenDatabase(database))
             {
                 SetupSessionResults(db);
                 AddSessionRecord(db, foreacstSession.SessionId, dataSetName, foreacstSession.RequestedDate);
             }
-            
+
             Console.Out.WriteLine($"Creating hourly forecast on {dataSetName} data from {startDate:O} to {endDate:O} costing ${foreacstSession.Cost.Amount}. Session id: {foreacstSession.SessionId}");
         }
 
         // creates an impact session 
-        private static async Task Impact(string database, string impactName, string dataSetName, DateTimeOffset startDate, DateTimeOffset endDate)
+        private static async Task Impact(string database, string impactName, string dataSetName, DateTimeOffset startDate, DateTimeOffset endDate, string interval = "Day")
         {
             var api = new NexosisClient(Environment.GetEnvironmentVariable("NEXOSIS_PROD_KEY"));
+            if (!Enum.TryParse(interval, /*ignoreCase*/ true, out ResultInterval parsedInterval))
+            {
+                parsedInterval = ResultInterval.Day;
+            }
 
             // given the name of the dataset, the 'column' of the data to predict on and the date range, it is easy to kick it off.
-            var impactSession = await api.Sessions.AnalyzeImpact(dataSetName, impactName, "value", startDate, endDate, ResultInterval.Hour);
+            var impactSession = await api.Sessions.AnalyzeImpact(dataSetName, impactName, "value", startDate, endDate, parsedInterval);
 
             using (var db = OpenDatabase(database))
             {
@@ -350,7 +359,7 @@ namespace AirQuality
             var results = await api.Sessions.GetResults(sessionId);
 
             // only save results if we actually have them
-            if (results.Status != SessionStatus.Completed)
+            if (results.Status != Status.Completed)
             {
                 Console.Out.WriteLine($"Unable to get results from session in {results.Status} state.");
                 return;
@@ -361,9 +370,10 @@ namespace AirQuality
             {
                 // if there is more to save, then do it
                 UpdateSession(sessionId, db, results);
-                    
+
                 using (var tran = db.BeginTransaction())
                 {
+                    CleanResults(sessionId, db);
                     foreach (var item in results.Data)
                     {
                         AddResult(sessionId, db, item);
@@ -371,11 +381,11 @@ namespace AirQuality
                     tran.Commit();
                 }
 
-                db.Close(); 
+                db.Close();
             }
         }
-        
-        private static async Task ListItems(string listType)
+
+        private static async Task ListItems(string listType, string database)
         {
             var api = new NexosisClient(Environment.GetEnvironmentVariable("NEXOSIS_PROD_KEY"));
             if (listType.Equals("data", StringComparison.OrdinalIgnoreCase))
@@ -383,22 +393,33 @@ namespace AirQuality
                 var results = await api.DataSets.List();
                 foreach (var r in results)
                 {
-                    Console.Out.WriteLine(r.DataSetName); 
+                    Console.Out.WriteLine(r.DataSetName);
                 }
             }
-            else if (listType.Equals("sessions", StringComparison.OrdinalIgnoreCase))
+            else if (listType.Equals("remote-sessions", StringComparison.OrdinalIgnoreCase))
             {
                 var results = await api.Sessions.List();
                 Console.Out.WriteLine("SessionId                           \tRequested Date                   \tStart Date                         \tEnd Date                         \tType      \tStatus");
                 foreach (var r in results)
                 {
-                    Console.Out.WriteLine( $"{r.SessionId:D}\t{r.RequestedDate:O}\t{r.StartDate:O}\t{r.EndDate:O}\t{r.Type.ToString("G").PadRight(10)}\t{r.Status}");
+                    Console.Out.WriteLine($"{r.SessionId:D}\t{r.RequestedDate:O}\t{r.StartDate:O}\t{r.EndDate:O}\t{r.Type.ToString("G").PadRight(10)}\t{r.Status}");
+                }
+            }
+            else if (listType.Equals("local-sessions", StringComparison.OrdinalIgnoreCase))
+            {
+                using (var db = OpenDatabase(database))
+                using (var sessions = GetSessions(db))
+                {
+                    Console.Out.WriteLine("SessionId                           \tRequested Date                   \tName");
+                    while (sessions.Read())
+                    {
+                        Console.WriteLine($"{Guid.Parse(sessions.GetString(0)):D}\t{sessions.GetDateTime(2):O}\t{sessions.GetString(1)}");
+                    }
                 }
             }
         }
 
-        
-        
+
         // table schema definition methods 
         private static void SetupImport(SqliteConnection db)
         {
@@ -415,7 +436,7 @@ namespace AirQuality
             db.CreateCommand("CREATE TABLE IF NOT EXISTS sessions(id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL, session_date TEXT NOT NULL, meta TEXT)").ExecuteNonQuery();
             db.CreateCommand("CREATE TABLE IF NOT EXISTS session_results(session_id INTEGER NOT NULL, timestamp TEXT NOT NULL, value DOUBLE NOT NULL, FOREIGN KEY(session_id) REFERENCES sessions(id))").ExecuteNonQuery();
         }
-       
+
 
         // `import` table data access
         private static void AddMeasurement(SqliteConnection db, DateTimeOffset date, int value, bool valid)
@@ -438,16 +459,18 @@ namespace AirQuality
             db.CreateCommand("INSERT INTO measurements SELECT NULL, timestamp, value, 'sensor', 'h' FROM import WHERE is_valid = 1").ExecuteNonQuery();
         }
 
-        
+
         // `measurement` table data access 
-        private static SqliteDataReader GetMeasurements(SqliteConnection db, DateTimeOffset? startDate, DateTimeOffset? endDate)
+        private static SqliteDataReader GetMeasurements(SqliteConnection db, DateTimeOffset? startDate, DateTimeOffset? endDate, string source, string interval)
         {
             return db.CreateCommand(
-                "SELECT timestamp, value FROM measurements WHERE interval = 'h' AND timestamp BETWEEN @start AND @end ORDER BY timestamp",
+                "SELECT timestamp, value FROM measurements WHERE interval = @interval AND (@source IS NULL OR source = @source) AND timestamp BETWEEN @start AND @end ORDER BY timestamp",
+                new SqliteParameter("@interval", interval.Substring(0, 1).ToLowerInvariant()),
+                new SqliteParameter("@source", source),
                 new SqliteParameter("@start", startDate ?? DateTimeOffset.MinValue),
                 new SqliteParameter("@end", endDate ?? DateTimeOffset.MaxValue)).ExecuteReader();
         }
-       
+
         private static void AddImputedValue(SqliteConnection db, DateTimeOffset date, int value)
         {
             db.CreateCommand(
@@ -461,10 +484,23 @@ namespace AirQuality
         // `session` table data access
         private static void AddSessionRecord(SqliteConnection db, Guid sessionId, string sessionName, DateTimeOffset date)
         {
-            db.CreateCommand("INSERT INTO sessions VALUES(NULL, @id, @name, @date)",
+            db.CreateCommand("INSERT INTO sessions VALUES(@id, @name, @date, NULL)",
                 new SqliteParameter("@id", sessionId.ToString("N")),
                 new SqliteParameter("@name", sessionName),
                 new SqliteParameter("@date", date)
+            ).ExecuteNonQuery();
+        }
+
+        private static SqliteDataReader GetSessions(SqliteConnection db)
+        {
+            return db.CreateCommand("SELECT * FROM sessions").ExecuteReader();
+        }
+        
+        private static void CleanResults(Guid sessionId, SqliteConnection db)
+        {
+            db.CreateCommand(
+                "DELETE FROM session_results WHERE session_id = @id",
+                new SqliteParameter("@id", sessionId.ToString("N"))
             ).ExecuteNonQuery();
         }
         
@@ -487,12 +523,55 @@ namespace AirQuality
         }
 
         //to get impact results for olympics
-        // select 
+        // SELECT 
         //  m.timestamp, m.value, p.timestamp, p.value 
-        // from 
-        //  measurements m left join session_results p on datetime(m.timestamp) = datetime(p.timestamp) 
-        // where 
-        //  m.timestamp between "2008-07-01 00:00 +8:00" and "2008-08-31 00:00 +8:00" order by m.timestamp;
+        // FROM 
+        //  measurements m LEFT JOIN session_results p ON datetime(m.timestamp) = datetime(p.timestamp) 
+        // WHERE 
+        //  m.timestamp BETWEEN "2008-07-01 00:00 +8:00" AND "2008-08-31 00:00 +8:00" ORDER BY m.timestamp;
+
+
+        // to do the averages
+        // INSERT INTO measurements SELECT NULL, date(timestamp), avg(value), 'computed', 'd' FROM measurements GROUP BY date(timestamp);
+
+        // to do the moving averages
+        //INSERT INTO measurements
+        //SELECT NULL,
+        //       moving.ts,
+        //       moving.average,
+        //       'avg',
+        //       'd'
+        //FROM
+        //    ( 
+        //        WITH m (ts,val) AS
+        //        (SELECT 
+        //            timestamp,
+        //            value
+        //        FROM 
+        //            measurements
+        //        WHERE
+        //            source = 'computed'
+        //            AND   
+        //            INTERVAL = 'd'
+        //            AND
+        //            timestamp BETWEEN date('2008-05-01') AND date('2008-09-30')
+        //        ) 
+        //        SELECT 
+        //            m.ts,
+        //            AVG(past.value) AS average 
+        //        FROM 
+        //            m, 
+        //            measurements AS past 
+        //        WHERE 
+        //            past.source = 'computed' 
+        //            AND 
+        //            past.interval = 'd' 
+        //            AND 
+        //            past.timestamp BETWEEN date(m.ts,'-6 days') AND m.ts
+        //        GROUP BY 
+        //            m.ts, m.val
+        //    ) AS moving;
+
     }
 
     public static class SqliteConnectionExtensions
