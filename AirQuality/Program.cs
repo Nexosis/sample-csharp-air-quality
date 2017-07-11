@@ -349,7 +349,7 @@ namespace AirQuality
                 AddSessionRecord(db, impactSession.SessionId, $"{dataSetName}.{impactName}", impactSession.RequestedDate);
             }
 
-            Console.Out.WriteLine($"Analyzing hourly impact on {dataSetName} data from {startDate:O} to {endDate:O} costing ${impactSession.Cost.Amount}. Session id: {impactSession.SessionId}");
+            Console.Out.WriteLine($"Analyzing {parsedInterval.ToString().ToLower()} impact on {dataSetName} data from {startDate:O} to {endDate:O} costing ${impactSession.Cost.Amount}. Session id: {impactSession.SessionId}");
         }
 
         // gets results for a session and saves to local db
@@ -518,7 +518,7 @@ namespace AirQuality
         {
             db.CreateCommand("UPDATE sessions SET meta = @meta WHERE session_id = @id",
                 new SqliteParameter("@meta", JsonConvert.SerializeObject(results.Metrics)),
-                new SqliteParameter("@id", sessionId)
+                new SqliteParameter("@id", sessionId.ToString("N"))
             ).ExecuteNonQuery();
         }
 
