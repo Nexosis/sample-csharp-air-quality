@@ -286,10 +286,10 @@ namespace AirQuality
                 for (int i = 0; i < ((measurements.Count / batchSize) + 1); i++)
                 {
                     var ds = await api.DataSets.Create(
-                        dataSetName,
+                        DataSet.From(dataSetName,
                         new DataSetDetail { Columns = columns, Data = measurements.Skip(i * batchSize).Take(batchSize).ToList() }
-                    );
-                    Console.Out.WriteLine($"Added to data set named {ds.DataSetName}. Cost: ${ds.Cost.Amount}.");
+                    ));
+                    Console.Out.WriteLine($"Added to data set named {ds.DataSetName}.");
                 }
                 db.Close();
             }
@@ -320,7 +320,7 @@ namespace AirQuality
                 parsedInterval = ResultInterval.Day;
             }
             // given the name of the dataset, the 'column' of the data to predict on and the date range, it is easy to kick it off.
-            var foreacstSession = await api.Sessions.CreateForecast(dataSetName, "value", startDate, endDate, parsedInterval);
+            var foreacstSession = await api.Sessions.CreateForecast(Sessions.Forecast(dataSetName, startDate, endDate, parsedInterval, "value"));
 
             using (var db = OpenDatabase(database))
             {
@@ -328,7 +328,7 @@ namespace AirQuality
                 AddSessionRecord(db, foreacstSession.SessionId, dataSetName, foreacstSession.RequestedDate);
             }
 
-            Console.Out.WriteLine($"Creating hourly forecast on {dataSetName} data from {startDate:O} to {endDate:O} costing ${foreacstSession.Cost.Amount}. Session id: {foreacstSession.SessionId}");
+            Console.Out.WriteLine($"Creating hourly forecast on {dataSetName} data from {startDate:O} to {endDate:O}. Session id: {foreacstSession.SessionId}");
         }
 
         // creates an impact session 
@@ -341,7 +341,7 @@ namespace AirQuality
             }
 
             // given the name of the dataset, the 'column' of the data to predict on and the date range, it is easy to kick it off.
-            var impactSession = await api.Sessions.AnalyzeImpact(dataSetName, impactName, "value", startDate, endDate, parsedInterval);
+            var impactSession = await api.Sessions.AnalyzeImpact(Sessions.Impact(dataSetName, startDate, endDate, parsedInterval, impactName, "value"));
 
             using (var db = OpenDatabase(database))
             {
@@ -349,7 +349,7 @@ namespace AirQuality
                 AddSessionRecord(db, impactSession.SessionId, $"{dataSetName}.{impactName}", impactSession.RequestedDate);
             }
 
-            Console.Out.WriteLine($"Analyzing {parsedInterval.ToString().ToLower()} impact on {dataSetName} data from {startDate:O} to {endDate:O} costing ${impactSession.Cost.Amount}. Session id: {impactSession.SessionId}");
+            Console.Out.WriteLine($"Analyzing {parsedInterval.ToString().ToLower()} impact on {dataSetName} data from {startDate:O} to {endDate:O}. Session id: {impactSession.SessionId}");
         }
 
         // gets results for a session and saves to local db
@@ -391,7 +391,7 @@ namespace AirQuality
             if (listType.Equals("data", StringComparison.OrdinalIgnoreCase))
             {
                 var results = await api.DataSets.List();
-                foreach (var r in results)
+                foreach (var r in results.Items)
                 {
                     Console.Out.WriteLine(r.DataSetName);
                 }
@@ -400,7 +400,7 @@ namespace AirQuality
             {
                 var results = await api.Sessions.List();
                 Console.Out.WriteLine("SessionId                           \tRequested Date                   \tStart Date                         \tEnd Date                         \tType      \tStatus");
-                foreach (var r in results)
+                foreach (var r in results.Items)
                 {
                     Console.Out.WriteLine($"{r.SessionId:D}\t{r.RequestedDate:O}\t{r.StartDate:O}\t{r.EndDate:O}\t{r.Type.ToString("G").PadRight(10)}\t{r.Status}");
                 }
